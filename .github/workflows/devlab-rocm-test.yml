@@ -180,7 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           . venv/bin/activate
-          python -u - <<'PY'
+          # From a file: @triton.jit needs the kernel's source.
+          cat > "$RUNNER_TEMP/smoke.py" <<'PY'
           # Gated DeltaNet forward and backward against FLA's own naive reference,
           # then which tl.dot input_precision values this arch's Triton accepts
           # (FLA uses 'tf32' only when IS_TF32_SUPPORTED, i.e. on NVIDIA).
@@ -236,6 +237,7 @@ jobs:
           json.dump(smoke, open("smoke.json", "w"), indent=1)
           assert smoke["gdn_chunk_fwd_bwd"] == "ok", smoke["gdn_chunk_fwd_bwd"]
           PY
+          python -u "$RUNNER_TEMP/smoke.py"
 
       - name: Tests (deterministic sample, one process per file)
         id: tests
