@@ -63,7 +63,7 @@ jobs:
           - gpu: radeon-r9700
             gfx: gfx1201
     runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
-    timeout-minutes: 170
+    timeout-minutes: 360   # a shard of the full suite can exceed 3 h (Triton compiles + autotunes per shape)
     env:
       TORCH_SPEC: ${{ inputs.torch_spec || 'torch' }}
       TORCH_INDEX_URL: ${{ inputs.torch_index_url || 'https://download.pytorch.org/whl/rocm7.2' }}
