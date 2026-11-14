@@ -1,6 +1,6 @@
-# DevLab support matrix for FLA: main on each torch ROCm line (pytorch.org
-# rocm7.2/7.14/10.0, AMD stable 10.1) plus AMD's next ROCm (TheRock
-# pre-release), on Strix Halo and the R9700. Weekly, in the DevLab fork only.
+# DevLab support matrix for FLA: the full test suite (sampled) on each torch
+# ROCm line (pytorch.org rocm7.2/7.14/10.0, AMD stable 10.1) plus AMD's next
+# ROCm (TheRock pre-release), on Strix Halo and the R9700. Weekly, fork only.
 name: DevLab support matrix
 
 on:
@@ -30,3 +30,4 @@ jobs:
       torch_spec: ${{ matrix.spec }}
       torch_index_url: ${{ matrix.index }}
       label: ${{ matrix.name }}
+      selection: full

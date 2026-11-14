@@ -5,8 +5,14 @@
 # was removed). This job installs ROCm torch (pytorch.org's rocm7.2 index, as
 # INSTALL.md documents) on a Radeon 8060S (Strix Halo, gfx1151) and a Radeon
 # AI PRO R9700 (gfx1201), checks that FLA picked the HIP backend rather than
-# falling back to the CPU, and runs a deterministic sample of tests/ the way
-# the H100 job does: one pytest process per file, backend dispatch disabled.
+# falling back to the CPU, and runs FLA's tests serially, one pytest process
+# per file (upstream's runners OOM otherwise):
+#   - push / dispatch (release gate): upstream's own selection. With targets,
+#     the catalog lane agent-h100-tests.yml runs (.github/agent-tests/catalog.json,
+#     scripts/agent_ci.py, platform h100); without, the H100 smoke tier
+#     (pytest -m smoke on each tests/ops file), as nvidia-h100-smoke.yml does.
+#   - selection=full (the weekly matrix): a deterministic sample of all of
+#     tests/, three shards per GPU.
 #
 # Every run uploads summary-*.json (versions, device, pass/fail counts) so
 # results compare across torch/ROCm versions; other workflows call this one
@@ -21,6 +27,23 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      selection:
+        description: "agent: upstream's catalog targets, or the smoke tier when no targets; full: sampled full suite"
+        type: choice
+        options: [agent, full]
+        default: agent
+      suite:
+        description: Catalog suite (.github/agent-tests/catalog.json) for targets
+        default: ops
+      targets:
+        description: Space-separated test files or node ids in the suite (empty = H100 smoke tier)
+        default: ""
+      dispatch:
+        description: Backend dispatch off / on / both (catalog modes)
+        default: "off"
+      torch_spec:
+        description: torch requirement ({gfx} = the job's chip)
+        default: torch
       torch_index_url:
         description: Index torch comes from
         default: https://download.pytorch.org/whl/rocm7.2
@@ -38,25 +61,26 @@ on:
       torch_spec: {type: string, default: "torch"}
       torch_index_url: {type: string, default: https://download.pytorch.org/whl/rocm7.2}
       tests_per_file: {type: string, default: "3"}
+      selection: {type: string, default: full}
       label: {type: string, default: release}
 
 permissions:
   contents: read
 
 concurrency:
-  group: rocm-test-${{ github.ref }}-${{ inputs.label || 'release' }}
+  group: rocm-test-${{ github.ref }}-${{ inputs.label || 'release' }}-${{ inputs.selection || 'agent' }}-${{ inputs.torch_spec || 'torch' }}-${{ inputs.targets || 'smoke' }}
   cancel-in-progress: true
 
 jobs:
   test:
-    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ matrix.shard }}/3
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ inputs.selection || 'agent' }} ${{ matrix.shard }}
     strategy:
       fail-fast: false
       matrix:
-        # The sampled suite takes about 5 h on one of these GPUs (Triton
+        # The sampled full suite takes about 5 h on one of these GPUs (Triton
         # compiles and autotunes per shape), so each GPU runs it as three shards.
         gpu: [strix-halo, radeon-r9700]
-        shard: [1, 2, 3]
+        shard: ${{ fromJSON(inputs.selection == 'full' && '[1, 2, 3]' || '[1]') }}
         include:
           - gpu: strix-halo
             gfx: gfx1151
@@ -69,7 +93,11 @@ jobs:
       TORCH_INDEX_URL: ${{ inputs.torch_index_url || 'https://download.pytorch.org/whl/rocm7.2' }}
       PER_FILE: ${{ inputs.tests_per_file || '3' }}
       SHARD: ${{ matrix.shard }}
-      SHARDS: "3"
+      SHARDS: ${{ inputs.selection == 'full' && '3' || '1' }}
+      SELECTION: ${{ inputs.selection || 'agent' }}
+      AGENT_SUITE: ${{ inputs.suite || 'ops' }}
+      AGENT_TARGETS: ${{ inputs.targets || '' }}
+      AGENT_DISPATCH: ${{ inputs.dispatch || 'off' }}
       TEST_PATHS: ${{ inputs.test_paths || '' }}
       PYTEST_K: ${{ inputs.pytest_k || '' }}
       LABEL: ${{ inputs.label || 'release' }}
@@ -245,47 +273,78 @@ jobs:
           PY
           python -u "$RUNNER_TEMP/smoke.py"
 
-      - name: Tests (deterministic sample, one process per file)
+      - name: Tests (serial, one process per file)
         id: tests
         if: ${{ !cancelled() && steps.check.outcome == 'success' }}
         run: |
           set -uo pipefail
           . venv/bin/activate
-          # One pytest process per file, as upstream CI does: the suite piles up
-          # Triton JIT caches and allocator state, and the R9700 VMs have 32 GB
-          # of host RAM. No --exitfirst: one failure must not hide the rest.
-          # tests/cp: only the single-rank files (the others need two GPUs).
           # This step never fails the job; "Judge results" does, from junit and
-          # each file's exit code (files.tsv).
-          paths="${TEST_PATHS:-tests/test_*.py tests/utils/test_*.py tests/modules/test_*.py tests/modules/residuals/test_*.py tests/ops/test_*.py tests/ops/utils/test_*.py tests/layers/test_*.py tests/models/test_*.py tests/cp/test_intracard.py tests/cp/test_graph.py}"
-          k=()
-          [ -z "$PYTEST_K" ] || k=(-k "$PYTEST_K")
-          # This test builds a venv with --system-site-packages to reach torch,
-          # which only works when pytest runs from a system or conda Python (as
-          # upstream CI does), not from a venv like this one.
-          k+=(--deselect tests/test_split_package_release.py::test_full_split_import_contract_when_runtime_dependencies_available)
+          # each run's exit code (files.tsv: target, exit code, junit path).
           mkdir -p junit
           : > files.tsv
           i=0
-          for f in $paths; do
-            [ -f "$f" ] || continue
-            i=$((i + 1))
-            # Files alternate between the shards, which spreads the slow ones.
-            [ $(( (i - 1) % SHARDS + 1 )) -eq "$SHARD" ] || continue
-            xml="junit/$(printf %03d $i).xml"
-            echo "::group::$f"
-            start=$SECONDS
-            rc=0
-            # 10 min per test; the file gets that per sampled test plus slack, so
-            # pytest itself reports a hung test (with its stack) and writes junit.
-            budget=$(( PER_FILE > 0 ? PER_FILE * 600 + 300 : 5400 ))
-            PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
-              timeout -k 30 "$budget" python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
-              -o log_cli=false --tb=short --timeout=600 --junitxml="$xml" "${k[@]}" || rc=$?
+          run() {  # run <label> <junit> <command...>
+            local label=$1 xml=$2 rc=0 start=$SECONDS
+            shift 2
+            echo "::group::$label"
+            "$@" || rc=$?
             echo "::endgroup::"
-            echo "$f: exit $rc in $((SECONDS - start)) s"
-            printf '%s\t%s\t%s\n' "$f" "$rc" "$xml" >> files.tsv
-          done
+            echo "$label: exit $rc in $((SECONDS - start)) s"
+            printf '%s\t%s\t%s\n' "$label" "$rc" "$xml" >> files.tsv
+          }
+          if [ "$SELECTION" = agent ] && [ -n "$AGENT_TARGETS" ]; then
+            # Upstream's agent lane, as agent-h100-tests.yml runs it: agent_ci.py
+            # validates each target against the catalog and runs it with
+            # pytest -s -v --exitfirst. One call per target and dispatch mode,
+            # so a failing target does not stop the others.
+            modes=$AGENT_DISPATCH
+            [ "$modes" != both ] || modes="off on"
+            for t in $AGENT_TARGETS; do
+              for m in $modes; do
+                i=$((i + 1))
+                res="$RUNNER_TEMP/agent-ci/$i"
+                run "${t%%::*}" "$res/$m-0.xml" timeout -k 30 5400 python scripts/agent_ci.py --platform h100 \
+                  --suite "$AGENT_SUITE" --targets "$t" --dispatch "$m" \
+                  --results "$res" --metadata "$res/metadata.json"
+              done
+            done
+          elif [ "$SELECTION" = agent ]; then
+            # No targets (push): the H100 smoke tier, as nvidia-h100-smoke.yml
+            # runs it: pytest -s -v --exitfirst -m smoke on each tests/ops file;
+            # exit 5 (no smoke test in the file) is fine.
+            for f in tests/ops/test_*.py; do
+              i=$((i + 1))
+              xml="junit/$(printf %03d $i).xml"
+              run "$f" "$xml" timeout -k 30 5400 python -m pytest -s -v --exitfirst -m smoke \
+                -p no:cacheprovider -o log_cli=false --tb=short --timeout=1200 --junitxml="$xml" "$f"
+            done
+          else
+            # Full suite (weekly matrix): a deterministic sample of every file.
+            # No --exitfirst here: one failure must not hide the rest.
+            # tests/cp: only the single-rank files (the others need two GPUs).
+            paths="${TEST_PATHS:-tests/test_*.py tests/utils/test_*.py tests/modules/test_*.py tests/modules/residuals/test_*.py tests/ops/test_*.py tests/ops/utils/test_*.py tests/layers/test_*.py tests/models/test_*.py tests/cp/test_intracard.py tests/cp/test_graph.py}"
+            k=()
+            [ -z "$PYTEST_K" ] || k=(-k "$PYTEST_K")
+            # This test builds a venv with --system-site-packages to reach torch,
+            # which only works when pytest runs from a system or conda Python (as
+            # upstream CI does), not from a venv like this one.
+            k+=(--deselect tests/test_split_package_release.py::test_full_split_import_contract_when_runtime_dependencies_available)
+            for f in $paths; do
+              [ -f "$f" ] || continue
+              i=$((i + 1))
+              # Files alternate between the shards, which spreads the slow ones.
+              [ $(( (i - 1) % SHARDS + 1 )) -eq "$SHARD" ] || continue
+              xml="junit/$(printf %03d $i).xml"
+              # 20 min per test (the first test of a model file autotunes every
+              # kernel of the model); the file gets that per sampled test plus
+              # slack, so pytest itself reports a hung test and writes junit.
+              budget=$(( PER_FILE > 0 ? PER_FILE * 1200 + 300 : 7200 ))
+              run "$f" "$xml" env PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
+                timeout -k 30 "$budget" python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
+                -o log_cli=false --tb=short --timeout=1200 --junitxml="$xml" "${k[@]}"
+            done
+          fi
 
       - name: Judge results
         if: ${{ !cancelled() }}
@@ -385,7 +444,7 @@ jobs:
               "schema": 1, "project": "flash-linear-attention", "label": os.environ["LABEL"],
               "release": env.get("fla", ""), "combo": f"torch{env.get('torch', '?')}",
               "torch_spec": os.environ.get("TORCH_SPEC", ""), "gpu": "${{ matrix.gpu }}",
-              "gfx": "${{ matrix.gfx }}", "shard": "${{ matrix.shard }}/3", "env": env or None, "smoke": load("smoke.json"),
+              "gfx": "${{ matrix.gfx }}", "selection": os.environ.get("SELECTION"), "shard": "${{ matrix.shard }}", "env": env or None, "smoke": load("smoke.json"),
               "tests": tests, "job_status": "${{ job.status }}", "commit": "${{ github.sha }}",
               "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
               "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -400,6 +459,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          name: devlab-summary-${{ inputs.label || 'release' }}-${{ inputs.selection || 'agent' }}-${{ matrix.gpu }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: summary.json
           retention-days: 90
