@@ -128,7 +128,8 @@ jobs:
           echo "torch: $spec from $INDEX"
           # PIP_CONFIG_FILE=/dev/null: a runner's pip.conf may add PyPI as an extra
           # index, and PyPI's newer CUDA torch would then win over the ROCm one.
-          PIP_CONFIG_FILE=/dev/null pip install -q $spec --index-url "$INDEX" "${EXTRA[@]}"
+          read -ra specs <<<"$spec"          # word-split, no globbing (==2.15.*)
+          PIP_CONFIG_FILE=/dev/null pip install -q "${specs[@]}" --index-url "$INDEX" "${EXTRA[@]}"
           # Pin the torch stack for every later pip call: a package that depends on
           # torch can otherwise replace the ROCm build with a CUDA wheel from PyPI.
           pip freeze | grep -iE '^(torch|torchvision|torchaudio|triton|pytorch-triton-rocm|triton-rocm|rocm[a-z0-9_-]*)==' \

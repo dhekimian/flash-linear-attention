@@ -1,6 +1,6 @@
-# DevLab support matrix for FLA: main on each torch ROCm line, plus AMD's next
-# ROCm (TheRock pre-release), on Strix Halo and the R9700. Weekly, in the
-# DevLab fork only.
+# DevLab support matrix for FLA: main on each torch ROCm line (pytorch.org
+# rocm7.2/7.14/10.0, AMD stable 10.1) plus AMD's next ROCm (TheRock
+# pre-release), on Strix Halo and the R9700. Weekly, in the DevLab fork only.
 name: DevLab support matrix
 
 on:
@@ -18,10 +18,13 @@ jobs:
       max-parallel: 3
       matrix:
         include:
-          - {name: rocm10.0, spec: "torch", index: "https://download.pytorch.org/whl/rocm10.0"}
           - {name: rocm7.2, spec: "torch", index: "https://download.pytorch.org/whl/rocm7.2"}
-          # TheRock pre-release: the next ROCm; {gfx} picks each job's chip package.
-          - {name: rocm-next, spec: "torch[device-{gfx}]", index: "https://rc.repo.amd.com/rocm/whl-next/"}
+          - {name: rocm7.14, spec: "torch", index: "https://download.pytorch.org/whl/rocm7.14"}
+          - {name: rocm10.0, spec: "torch", index: "https://download.pytorch.org/whl/rocm10.0"}
+          # AMD's stable ROCm torch; {gfx} picks each job's chip package.
+          - {name: rocm10.1, spec: "torch[device-{gfx}]==2.14.0+rocm10.1.0", index: "https://stable.repo.amd.com/rocm/whl-next/"}
+          # TheRock pre-release: the next ROCm.
+          - {name: rocm-next, spec: "torch[device-{gfx}]==2.15.*", index: "https://rc.repo.amd.com/rocm/whl-next/"}
     uses: ./.github/workflows/devlab-rocm-test.yml
     with:
       torch_spec: ${{ matrix.spec }}
