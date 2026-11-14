@@ -155,8 +155,10 @@ jobs:
           p = torch.cuda.get_device_properties(0)
           import fla
           from fla import utils as fu
-          import fla.ops.gated_delta_rule.chunk_fwd as gdn_fwd
-          import fla.ops.utils.solve_tril as st
+          import importlib
+          # Modules, not the functions of the same name that fla.ops re-exports.
+          gdn_fwd = importlib.import_module("fla.ops.gated_delta_rule.chunk_fwd")
+          st = importlib.import_module("fla.ops.utils.solve_tril")
           info = {"torch": torch.__version__, "hip": torch.version.hip, "device": p.name,
                   "arch": p.gcnArchName, "triton": triton.__version__, "fla": fla.__version__,
                   "transformers": md.version("transformers"),
