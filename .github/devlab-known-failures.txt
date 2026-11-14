@@ -31,3 +31,7 @@ tests/models/test_modeling_gsa2.py::test_forward_metadata_gradients* | gsa2 chun
 tests/models/test_modeling_gsa2.py::test_generation_with_slot_projections | gsa2 chunk kernels: 72 KB shared memory > 64 KB on RDNA | not filed
 tests/models/test_modeling_gated_deltaproduct.py::test_modeling* | gated_deltaproduct chunk kernel needs 68 KB shared memory > 64 KB on RDNA | not filed
 tests/models/test_cache.py::test_cached_continuation_without_attention_state[[]cache-bitattention[]] | needs flash-attn (not installed; no ROCm wheel here) and the test has no importorskip | not filed
+tests/models/test_modeling.py::test_forward[[]L4-B4-T1024-H4-D64-l2False-bs1-torch.bfloat16-varlen-delta_net[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_forgetting_transformer.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs1-torch.bfloat16-dense[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_kda.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs1-torch.bfloat16-varlen[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_parallax.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs2-torch.bfloat16-dense[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
