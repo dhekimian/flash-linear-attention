@@ -4,3 +4,7 @@
 # Test ids look like tests/ops/test_gdn.py::test_chunk[...]; a crashed or
 # timed-out file is tests/ops/test_x.py::<exit N>.
 tests/ops/test_precond_kda.py::test_*chunk* | precond_kda recompute_w_u_fwd_kernel defaults DOT_PRECISION='tf32x3' (not gated on IS_TF32_SUPPORTED); RDNA Triton accepts only ieee/bf16x3/bf16x6 | not filed
+tests/ops/test_attnres.py::test_attnres* | attnres_fwd_kernel's per-row pointer select (tl.where over a pointer tuple) crashes Triton's AMD TritonAMDGPUCanonicalizePointers pass ('tt.addptr' op failed to verify) | not filed
+tests/modules/residuals/test_attnres.py::test_attnres* | same attnres_fwd_kernel Triton AMD compile failure (PassManager::run failed) | not filed
+tests/ops/test_gated_oja_rule2.py::test_chunk* | chunk kernels need 72-208 KB shared memory; RDNA has 64 KB (no smem guard for this op) | not filed
+tests/ops/test_gka.py::test_chunk*bwd* | chunk backward needs 96 KB shared memory (fp32); RDNA has 64 KB (no smem guard for this op) | not filed
