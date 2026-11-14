@@ -78,6 +78,8 @@ jobs:
       # required suite runs the Triton kernels with backend dispatch disabled.
       FLA_CI_ENV: "1"
       FLA_DISABLE_BACKEND_DISPATCH: "1"
+      AMD_SERIALIZE_KERNEL: "3"
+      PYTHONFAULTHANDLER: "1"
       SAMPLER_DIR: ${{ github.workspace }}/../devlab-sampler
     steps:
       - uses: actions/checkout@v4
@@ -277,7 +279,7 @@ jobs:
             start=$SECONDS
             rc=0
             PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
-              timeout -k 30 1800 python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
+              timeout -k 30 1800 python -m pytest "$f" -p devlab_sample -v -rfE -p no:cacheprovider \
               -o log_cli=false --tb=short --timeout=900 --junitxml="$xml" "${k[@]}" || rc=$?
             echo "::endgroup::"
             echo "$f: exit $rc in $((SECONDS - start)) s"
