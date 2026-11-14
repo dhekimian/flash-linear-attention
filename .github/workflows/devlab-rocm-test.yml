@@ -26,7 +26,7 @@ on:
         default: https://download.pytorch.org/whl/rocm7.2
       tests_per_file:
         description: Test cases to run per test file (0 = all)
-        default: "6"
+        default: "4"
       test_paths:
         description: Optional space-separated test files or globs (empty = the default set)
         default: ""
@@ -37,7 +37,7 @@ on:
     inputs:
       torch_spec: {type: string, default: "torch"}
       torch_index_url: {type: string, default: https://download.pytorch.org/whl/rocm7.2}
-      tests_per_file: {type: string, default: "6"}
+      tests_per_file: {type: string, default: "4"}
       label: {type: string, default: release}
 
 permissions:
@@ -49,21 +49,27 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.gpu }} (${{ matrix.gfx }})
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ matrix.shard }}/2
     strategy:
       fail-fast: false
       matrix:
+        # The sampled suite takes about 4 h on one of these GPUs (Triton
+        # compiles and autotunes per shape), so each GPU runs it as two shards.
+        gpu: [strix-halo, radeon-r9700]
+        shard: [1, 2]
         include:
           - gpu: strix-halo
             gfx: gfx1151
           - gpu: radeon-r9700
             gfx: gfx1201
     runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
-    timeout-minutes: 150
+    timeout-minutes: 170
     env:
       TORCH_SPEC: ${{ inputs.torch_spec || 'torch' }}
       TORCH_INDEX_URL: ${{ inputs.torch_index_url || 'https://download.pytorch.org/whl/rocm7.2' }}
-      PER_FILE: ${{ inputs.tests_per_file || '6' }}
+      PER_FILE: ${{ inputs.tests_per_file || '4' }}
+      SHARD: ${{ matrix.shard }}
+      SHARDS: "2"
       TEST_PATHS: ${{ inputs.test_paths || '' }}
       PYTEST_K: ${{ inputs.pytest_k || '' }}
       LABEL: ${{ inputs.label || 'release' }}
@@ -254,19 +260,25 @@ jobs:
           paths="${TEST_PATHS:-tests/test_*.py tests/utils/test_*.py tests/modules/test_*.py tests/modules/residuals/test_*.py tests/ops/test_*.py tests/ops/utils/test_*.py tests/layers/test_*.py tests/models/test_*.py tests/cp/test_intracard.py tests/cp/test_graph.py}"
           k=()
           [ -z "$PYTEST_K" ] || k=(-k "$PYTEST_K")
+          # This test builds a venv with --system-site-packages to reach torch,
+          # which only works when pytest runs from a system or conda Python (as
+          # upstream CI does), not from a venv like this one.
+          k+=(--deselect tests/test_split_package_release.py::test_full_split_import_contract_when_runtime_dependencies_available)
           mkdir -p junit
           : > files.tsv
           i=0
           for f in $paths; do
             [ -f "$f" ] || continue
             i=$((i + 1))
+            # Files alternate between the shards, which spreads the slow ones.
+            [ $(( (i - 1) % SHARDS + 1 )) -eq "$SHARD" ] || continue
             xml="junit/$(printf %03d $i).xml"
             echo "::group::$f"
             start=$SECONDS
             rc=0
             PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
               timeout -k 30 1800 python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
-              -o log_cli=false --timeout=900 --junitxml="$xml" "${k[@]}" || rc=$?
+              -o log_cli=false --tb=short --timeout=900 --junitxml="$xml" "${k[@]}" || rc=$?
             echo "::endgroup::"
             echo "$f: exit $rc in $((SECONDS - start)) s"
             printf '%s\t%s\t%s\n' "$f" "$rc" "$xml" >> files.tsv
@@ -368,7 +380,7 @@ jobs:
               "schema": 1, "project": "flash-linear-attention", "label": os.environ["LABEL"],
               "release": env.get("fla", ""), "combo": f"torch{env.get('torch', '?')}",
               "torch_spec": os.environ.get("TORCH_SPEC", ""), "gpu": "${{ matrix.gpu }}",
-              "gfx": "${{ matrix.gfx }}", "env": env or None, "smoke": load("smoke.json"),
+              "gfx": "${{ matrix.gfx }}", "shard": "${{ matrix.shard }}/2", "env": env or None, "smoke": load("smoke.json"),
               "tests": tests, "job_status": "${{ job.status }}", "commit": "${{ github.sha }}",
               "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
               "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
@@ -383,6 +395,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ github.run_attempt }}
+          name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ matrix.shard }}-${{ github.run_attempt }}
           path: summary.json
           retention-days: 90
