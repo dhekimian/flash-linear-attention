@@ -1,0 +1,383 @@
+# Run FLA's own GPU test suite on real consumer AMD GPUs.
+#
+# FLA's kernels are pure Triton, and the README says they are verified on AMD,
+# but no CI runs them on an AMD GPU (the MI300 workflow never had a runner and
+# was removed). This job installs ROCm torch (pytorch.org's rocm7.2 index, as
+# INSTALL.md documents) on a Radeon 8060S (Strix Halo, gfx1151) and a Radeon
+# AI PRO R9700 (gfx1201), checks that FLA picked the HIP backend rather than
+# falling back to the CPU, and runs a deterministic sample of tests/ the way
+# the H100 job does: one pytest process per file, backend dispatch disabled.
+#
+# Every run uploads summary-*.json (versions, device, pass/fail counts) so
+# results compare across torch/ROCm versions; other workflows call this one
+# for a version matrix (workflow_call).
+#
+# Runners: AMD DevLab, a donated pool of single-use machines. One job per
+# machine; nothing persists between jobs.
+name: ROCm test (gfx1151, gfx1201)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      torch_index_url:
+        description: Index torch comes from
+        default: https://download.pytorch.org/whl/rocm7.2
+      tests_per_file:
+        description: Test cases to run per test file (0 = all)
+        default: "6"
+      test_paths:
+        description: Optional space-separated test files or globs (empty = the default set)
+        default: ""
+      pytest_k:
+        description: Optional pytest -k expression (e.g. to rerun one failing test in full)
+        default: ""
+  workflow_call:
+    inputs:
+      torch_spec: {type: string, default: "torch"}
+      torch_index_url: {type: string, default: https://download.pytorch.org/whl/rocm7.2}
+      tests_per_file: {type: string, default: "6"}
+      label: {type: string, default: release}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocm-test-${{ github.ref }}-${{ inputs.label || 'release' }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - gpu: strix-halo
+            gfx: gfx1151
+          - gpu: radeon-r9700
+            gfx: gfx1201
+    runs-on: [self-hosted, Linux, devlab-dispatch, "${{ matrix.gpu }}"]
+    timeout-minutes: 150
+    env:
+      TORCH_SPEC: ${{ inputs.torch_spec || 'torch' }}
+      TORCH_INDEX_URL: ${{ inputs.torch_index_url || 'https://download.pytorch.org/whl/rocm7.2' }}
+      PER_FILE: ${{ inputs.tests_per_file || '6' }}
+      TEST_PATHS: ${{ inputs.test_paths || '' }}
+      PYTEST_K: ${{ inputs.pytest_k || '' }}
+      LABEL: ${{ inputs.label || 'release' }}
+      TORCH_INDEX_MAP: ${{ vars.TORCH_INDEX_MAP }}
+      # As upstream CI: FLA_CI_ENV relaxes a few tolerances to warnings, and the
+      # required suite runs the Triton kernels with backend dispatch disabled.
+      FLA_CI_ENV: "1"
+      FLA_DISABLE_BACKEND_DISPATCH: "1"
+      SAMPLER_DIR: ${{ github.workspace }}/../devlab-sampler
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write the test sampler
+        run: |
+          # A pytest plugin that keeps a deterministic sample at collection time,
+          # so node ids never pass through the shell.
+          mkdir -p "$SAMPLER_DIR"
+          cat > "$SAMPLER_DIR/devlab_sample.py" <<'PY'
+          import os
+          from collections import defaultdict
+
+
+          def pytest_collection_modifyitems(config, items):
+              per = int(os.environ.get("DEVLAB_PER") or 0)
+              if per <= 0:
+                  return
+              by_file = os.environ.get("DEVLAB_GROUP", "function") == "file"
+              groups = defaultdict(list)
+              for item in items:
+                  nodeid = item.nodeid
+                  groups[nodeid.split("::")[0] if by_file else nodeid.split("[")[0]].append(item)
+              keep = set()
+              for members in groups.values():
+                  step = max(1, len(members) // per)
+                  keep.update(id(i) for i in members[::step][:per])
+              config.hook.pytest_deselected(items=[i for i in items if id(i) not in keep])
+              items[:] = [i for i in items if id(i) in keep]
+          PY
+
+      - name: Install torch and FLA
+        run: |
+          set -euo pipefail
+          python3 -m venv venv
+          . venv/bin/activate
+          pip install -q --upgrade pip
+          spec="${TORCH_SPEC//\{gfx\}/${{ matrix.gfx }}}"     # torch[device-{gfx}] for TheRock
+          INDEX="$TORCH_INDEX_URL"
+          # A runner pool with a package mirror maps public indexes to it with the
+          # TORCH_INDEX_MAP repository variable (JSON: index URL -> mirror URL).
+          # Unset, the index is used as given.
+          EXTRA=()
+          if [ -n "${TORCH_INDEX_MAP:-}" ]; then
+            idx_in="$INDEX"
+            # A value is a mirror URL, or a list [index, extra index, ...] when the
+            # mirror serves the index's packages from more than one repository.
+            idx=$(python3 -c 'import json,sys; m=json.loads(sys.argv[1]); u=sys.argv[2]; v=m.get(u.rstrip("/")+"/", m.get(u.rstrip("/"), u)); print("\n".join([v] if isinstance(v, str) else v))' "$TORCH_INDEX_MAP" "$INDEX")
+            mapfile -t idx <<<"$idx"
+            INDEX="${idx[0]}"
+            for e in "${idx[@]:1}"; do EXTRA+=(--extra-index-url "$e"); done
+            [ "$INDEX" = "$idx_in" ] && [ ${#idx[@]} -eq 1 ] || echo "torch index mapped: $idx_in -> $INDEX${EXTRA:+ (extra: ${idx[*]:1})}"
+          fi
+          echo "torch: $spec from $INDEX"
+          # PIP_CONFIG_FILE=/dev/null: a runner's pip.conf may add PyPI as an extra
+          # index, and PyPI's newer CUDA torch would then win over the ROCm one.
+          PIP_CONFIG_FILE=/dev/null pip install -q $spec --index-url "$INDEX" "${EXTRA[@]}"
+          # Pin the torch stack for every later pip call: a package that depends on
+          # torch can otherwise replace the ROCm build with a CUDA wheel from PyPI.
+          pip freeze | grep -iE '^(torch|torchvision|torchaudio|triton|pytorch-triton-rocm|triton-rocm|rocm[a-z0-9_-]*)==' \
+            > "$RUNNER_TEMP/torch-pin.txt"
+          cat "$RUNNER_TEMP/torch-pin.txt"
+          export PIP_CONSTRAINT="$RUNNER_TEMP/torch-pin.txt"
+          echo "PIP_CONSTRAINT=$PIP_CONSTRAINT" >> "$GITHUB_ENV"
+          # INSTALL.md's ROCm install: the [rocm] extra (torch only; Triton comes
+          # with the torch wheel) plus the [test] extra.
+          pip install -q -e ".[rocm,test]" pytest-timeout
+          pip list 2>/dev/null | grep -iE '^(torch|triton|pytorch-triton|flash-linear|transformers) '
+
+      - name: Check the device and FLA's backend
+        id: check
+        run: |
+          set -euo pipefail
+          . venv/bin/activate
+          python -u - <<'PY'
+          import faulthandler, json, importlib.metadata as md
+          faulthandler.enable()
+          import torch, triton
+          assert torch.version.hip, f"not a ROCm build of torch: {torch.__version__}"
+          torch.cuda.init()
+          p = torch.cuda.get_device_properties(0)
+          import fla
+          from fla import utils as fu
+          import fla.ops.gated_delta_rule.chunk_fwd as gdn_fwd
+          import fla.ops.utils.solve_tril as st
+          info = {"torch": torch.__version__, "hip": torch.version.hip, "device": p.name,
+                  "arch": p.gcnArchName, "triton": triton.__version__, "fla": fla.__version__,
+                  "transformers": md.version("transformers"),
+                  "fla_device_platform": fu.device_platform, "IS_AMD": fu.IS_AMD,
+                  "IS_TF32_SUPPORTED": fu.IS_TF32_SUPPORTED,
+                  "gdn_solve_tril_precision": str(getattr(gdn_fwd.SOLVE_TRIL_DOT_PRECISION, "value",
+                                                          gdn_fwd.SOLVE_TRIL_DOT_PRECISION)),
+                  "solve_tril_autotune_precisions": list(st.DOT_PRECISION_AUTOTUNE_LIST)}
+          print(info)
+          json.dump(info, open("env.json", "w"))
+          assert "${{ matrix.gfx }}" in p.gcnArchName, f"expected ${{ matrix.gfx }}, got {p.gcnArchName}"
+          # FLA silently falls back to the CPU when Triton's driver fails; every
+          # GPU test would then skip rather than fail.
+          assert fu.device_platform == "hip" and fu.IS_AMD, f"FLA backend is {fu.device_platform!r}, not 'hip'"
+          PY
+
+      - name: Smoke (gated delta rule; Triton dot precisions)
+        run: |
+          set -euo pipefail
+          . venv/bin/activate
+          python -u - <<'PY'
+          # Gated DeltaNet forward and backward against FLA's own naive reference,
+          # then which tl.dot input_precision values this arch's Triton accepts
+          # (FLA uses 'tf32' only when IS_TF32_SUPPORTED, i.e. on NVIDIA).
+          import faulthandler, json, traceback
+          faulthandler.enable()
+          import torch, triton, triton.language as tl
+          import torch.nn.functional as F
+          from fla.ops.gated_delta_rule import chunk_gated_delta_rule, naive_recurrent_gated_delta_rule
+          smoke = {}
+          torch.manual_seed(0)
+          B, T, H, D = 1, 256, 2, 64
+          dev = "cuda"
+          q = torch.randn(B, T, H, D, device=dev)
+          k = F.normalize(torch.randn(B, T, H, D, device=dev), p=2, dim=-1)
+          v = torch.randn(B, T, H, D, device=dev)
+          g = F.logsigmoid(torch.rand(B, T, H, device=dev))
+          beta = torch.rand(B, T, H, device=dev).sigmoid()
+          ins = [x.to(torch.bfloat16).requires_grad_() for x in (q, k, v)] + [g.requires_grad_(), beta.to(torch.bfloat16).requires_grad_()]
+          try:
+              o, _ = chunk_gated_delta_rule(*ins[:3], g=ins[3], beta=ins[4])
+              o.float().sum().backward()
+              ref, _ = naive_recurrent_gated_delta_rule(q, k, v, beta.to(torch.bfloat16).float(), g)
+              err = ((o.float() - ref).norm() / ref.norm()).item()
+              smoke["gdn_chunk_fwd_bwd"] = "ok"
+              smoke["gdn_chunk_rel_err"] = round(err, 5)
+              print(f"chunk_gated_delta_rule fwd+bwd ok, relative error vs naive {err:.2e}")
+          except Exception as e:
+              smoke["gdn_chunk_fwd_bwd"] = f"error: {type(e).__name__}: {str(e).splitlines()[0][:300] if str(e) else ''}"
+              traceback.print_exc()
+
+          @triton.jit
+          def dot_kernel(a, b, c, PREC: tl.constexpr):
+              r = tl.arange(0, 32)
+              x = tl.load(a + r[:, None] * 32 + r[None, :])
+              y = tl.load(b + r[:, None] * 32 + r[None, :])
+              tl.store(c + r[:, None] * 32 + r[None, :], tl.dot(x, y, input_precision=PREC))
+
+          a = torch.randn(32, 32, device=dev)
+          b = torch.randn(32, 32, device=dev)
+          want = a.double() @ b.double()
+          probes = {}
+          for prec in ("ieee", "tf32", "tf32x3", "bf16x3"):
+              c = torch.empty_like(a)
+              try:
+                  dot_kernel[(1,)](a, b, c, PREC=prec)
+                  torch.cuda.synchronize()
+                  probes[prec] = f"ok (max err {(c.double() - want).abs().max().item():.1e})"
+              except Exception as e:
+                  msg = " ".join(str(e).split())
+                  probes[prec] = f"rejected: {type(e).__name__}: {msg[-300:]}"
+              print(f"tl.dot input_precision={prec!r}: {probes[prec]}")
+          smoke["triton_dot_precision"] = probes
+          json.dump(smoke, open("smoke.json", "w"), indent=1)
+          assert smoke["gdn_chunk_fwd_bwd"] == "ok", smoke["gdn_chunk_fwd_bwd"]
+          PY
+
+      - name: Tests (deterministic sample, one process per file)
+        id: tests
+        if: ${{ !cancelled() && steps.check.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          . venv/bin/activate
+          # One pytest process per file, as upstream CI does: the suite piles up
+          # Triton JIT caches and allocator state, and the R9700 VMs have 32 GB
+          # of host RAM. No --exitfirst: one failure must not hide the rest.
+          # tests/cp: only the single-rank files (the others need two GPUs).
+          # This step never fails the job; "Judge results" does, from junit and
+          # each file's exit code (files.tsv).
+          paths="${TEST_PATHS:-tests/test_*.py tests/utils/test_*.py tests/modules/test_*.py tests/modules/residuals/test_*.py tests/ops/test_*.py tests/ops/utils/test_*.py tests/layers/test_*.py tests/models/test_*.py tests/cp/test_intracard.py tests/cp/test_graph.py}"
+          k=()
+          [ -z "$PYTEST_K" ] || k=(-k "$PYTEST_K")
+          mkdir -p junit
+          : > files.tsv
+          i=0
+          for f in $paths; do
+            [ -f "$f" ] || continue
+            i=$((i + 1))
+            xml="junit/$(printf %03d $i).xml"
+            echo "::group::$f"
+            start=$SECONDS
+            rc=0
+            PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
+              timeout -k 30 1800 python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
+              -o log_cli=false --timeout=900 --junitxml="$xml" "${k[@]}" || rc=$?
+            echo "::endgroup::"
+            echo "$f: exit $rc in $((SECONDS - start)) s"
+            printf '%s\t%s\t%s\n' "$f" "$rc" "$xml" >> files.tsv
+          done
+
+      - name: Judge results
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          # Red means a new failure or a broken setup; a failure listed in
+          # .github/devlab-known-failures.txt (classified upstream) is a warning.
+          import fnmatch, json, os, xml.etree.ElementTree as ET
+          known = []
+          if os.path.exists(".github/devlab-known-failures.txt"):
+              for line in open(".github/devlab-known-failures.txt"):
+                  line = line.strip()
+                  if line and not line.startswith("#"):
+                      parts = [x.strip() for x in line.split("|")]
+                      known.append((parts[0], parts[1] if len(parts) > 1 else "", parts[2] if len(parts) > 2 else "not filed"))
+          broken, failing = [], []
+          if not os.path.exists("files.tsv") or not os.path.getsize("files.tsv"):
+              broken.append("the tests did not run (no files.tsv)")
+          else:
+              for row in open("files.tsv"):
+                  f, rc, xml = row.rstrip("\n").split("\t")
+                  rc = int(rc)
+                  ids = []
+                  if os.path.exists(xml):
+                      try:
+                          root = ET.parse(xml).getroot()
+                          for case in root.iter("testcase"):
+                              if case.find("failure") is not None or case.find("error") is not None:
+                                  cls, name = case.get("classname", ""), case.get("name", "")
+                                  ids.append(f"{f}::{name}" if cls.replace(".", "/") + ".py" == f or not cls
+                                             else f"{f}::{cls.rsplit('.', 1)[-1]}::{name}")
+                      except ET.ParseError:
+                          pass
+                  # pytest: 0 pass, 1 test failures, 5 nothing collected. Anything
+                  # else with no failing case in junit is a crash, timeout or a
+                  # collection/usage error: name it so it can be judged too.
+                  if rc not in (0, 1, 5) and not ids:
+                      ids.append(f"{f}::<exit {rc}>")
+                  failing += ids
+          known_hits, new = [], []
+          summ = open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a")
+          for t in failing:
+              m = next((k for k in known if fnmatch.fnmatchcase(t, k[0])), None)
+              if m:
+                  known_hits.append(t)
+                  print(f"::warning title=Known upstream failure::{t} - {m[1]} ({m[2]})")
+                  summ.write(f"- known upstream failure: `{t}` - {m[1]} ({m[2]})\n")
+              else:
+                  new.append(t)
+                  print(f"::error::{t}")
+                  summ.write(f"- **new failure**: `{t}`\n")
+          for b in broken:
+              print(f"::error::{b}")
+          verdict = "fail" if (new or broken) else ("known-failures" if known_hits else "pass")
+          json.dump({"verdict": verdict, "known_failures": known_hits, "new_failures": new + broken},
+                    open("verdict.json", "w"), indent=1)
+          print(f"verdict: {verdict} ({len(known_hits)} known, {len(new)} new)")
+          raise SystemExit(verdict == "fail")
+          PY
+
+      - name: Write the run summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, json, os, datetime, xml.etree.ElementTree as ET
+          def load(p):
+              try:
+                  return json.load(open(p))
+              except Exception:
+                  return None
+          tests = None
+          files = sorted(glob.glob("junit/*.xml"))
+          if files:
+              n = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+              secs = 0.0
+              failing = []
+              for path in files:
+                  try:
+                      root = ET.parse(path).getroot()
+                  except ET.ParseError:
+                      continue
+                  for s in ([root] if root.tag == "testsuite" else root.findall("testsuite")):
+                      for key in n:
+                          n[key] += int(s.get(key, 0))
+                      secs += float(s.get("time", 0))
+                      for case in s.iter("testcase"):
+                          if case.find("failure") is not None or case.find("error") is not None:
+                              failing.append(f"{case.get('classname')}::{case.get('name')}")
+              tests = {"ran": n["tests"], "failed": n["failures"], "errors": n["errors"],
+                       "skipped": n["skipped"],
+                       "passed": n["tests"] - n["failures"] - n["errors"] - n["skipped"],
+                       "seconds": round(secs, 1), "files": len(files), "failing": failing[:200]}
+          env = load("env.json") or {}
+          summary = {
+              "schema": 1, "project": "flash-linear-attention", "label": os.environ["LABEL"],
+              "release": env.get("fla", ""), "combo": f"torch{env.get('torch', '?')}",
+              "torch_spec": os.environ.get("TORCH_SPEC", ""), "gpu": "${{ matrix.gpu }}",
+              "gfx": "${{ matrix.gfx }}", "env": env or None, "smoke": load("smoke.json"),
+              "tests": tests, "job_status": "${{ job.status }}", "commit": "${{ github.sha }}",
+              "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+          }
+          v = load("verdict.json") or {"verdict": "fail", "known_failures": [], "new_failures": []}
+          summary.update(v)
+          json.dump(summary, open("summary.json", "w"), indent=1)
+          print(json.dumps(summary, indent=1))
+          PY
+
+      - name: Upload the run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devlab-summary-${{ inputs.label || 'release' }}-${{ matrix.gpu }}-${{ github.run_attempt }}
+          path: summary.json
+          retention-days: 90
