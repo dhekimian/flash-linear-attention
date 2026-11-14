@@ -3,3 +3,4 @@
 # Format: <fnmatch pattern on the test id> | <reason, one line> | <upstream issue URL, or "not filed">
 # Test ids look like tests/ops/test_gdn.py::test_chunk[...]; a crashed or
 # timed-out file is tests/ops/test_x.py::<exit N>.
+tests/ops/test_precond_kda.py::test_*chunk* | precond_kda recompute_w_u_fwd_kernel defaults DOT_PRECISION='tf32x3' (not gated on IS_TF32_SUPPORTED); RDNA Triton accepts only ieee/bf16x3/bf16x6 | not filed
