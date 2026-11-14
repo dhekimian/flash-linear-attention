@@ -9,3 +9,14 @@ tests/modules/residuals/test_attnres.py::test_attnres* | same attnres_fwd_kernel
 tests/ops/test_gated_oja_rule2.py::test_chunk* | chunk kernels need 72-208 KB shared memory; RDNA has 64 KB (no smem guard for this op) | not filed
 tests/ops/test_gka.py::test_chunk*bwd* | chunk backward needs 96 KB shared memory (fp32); RDNA has 64 KB (no smem guard for this op) | not filed
 tests/ops/test_gdn2.py::test_chunk_causality* | gfx1151 only: chunk_gdn2 backward is not bit-reproducible between two calls (a varying 1-3 of 22 cases differ in the last bits; torch.equal); gfx1201 passes all | not filed
+tests/models/test_modeling_gated_deltanet.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs4-torch.bfloat16-dense[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_gka.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs1-hvNone-torch.bfloat16-dense[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_gka.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs4-hvNone-torch.bfloat16-varlen[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_lightnet.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs1-torch.bfloat16-varlen[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_parallax.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs1-torch.bfloat16-dense[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/models/test_modeling_parallax.py::test_modeling[[]L4-B4-T1024-H4-D64-l2False-bs2-torch.bfloat16-varlen[]] | model with attention residuals: same attnres_fwd_kernel Triton AMD compile failure | not filed
+tests/layers/test_preconditioned_cache.py::test_preconditioned_cache_continuation*kda* | precond_kda chunk path: tl.dot input_precision='tf32x3' default (same as test_precond_kda) | not filed
+tests/ops/test_log_linear_attn.py::test_chunk_varlen* | log_linear_attn chunk exceeds 64 KB shared memory on RDNA (fp32, D128) | not filed
+tests/ops/test_triadic_gdn.py::test_chunk* | triadic_gdn chunk exceeds 64 KB shared memory on RDNA (K128/K256) | not filed
+*::<exit 139> | gfx1151 only, ROCm 7.2: random host segfault in torch code (different file each run: hgrn, path_attn); gone with AMD_SERIALIZE_KERNEL=3; platform, not FLA | not filed
+*::<exit 134> | gfx1151 only, ROCm 7.2: glibc 'double free or corruption' at exit (heap corruption, same class as the segfaults); platform, not FLA | not filed

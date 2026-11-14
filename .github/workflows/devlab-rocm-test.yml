@@ -26,7 +26,7 @@ on:
         default: https://download.pytorch.org/whl/rocm7.2
       tests_per_file:
         description: Test cases to run per test file (0 = all)
-        default: "4"
+        default: "3"
       test_paths:
         description: Optional space-separated test files or globs (empty = the default set)
         default: ""
@@ -37,7 +37,7 @@ on:
     inputs:
       torch_spec: {type: string, default: "torch"}
       torch_index_url: {type: string, default: https://download.pytorch.org/whl/rocm7.2}
-      tests_per_file: {type: string, default: "4"}
+      tests_per_file: {type: string, default: "3"}
       label: {type: string, default: release}
 
 permissions:
@@ -49,14 +49,14 @@ concurrency:
 
 jobs:
   test:
-    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ matrix.shard }}/2
+    name: ${{ matrix.gpu }} (${{ matrix.gfx }}) ${{ matrix.shard }}/3
     strategy:
       fail-fast: false
       matrix:
-        # The sampled suite takes about 4 h on one of these GPUs (Triton
-        # compiles and autotunes per shape), so each GPU runs it as two shards.
+        # The sampled suite takes about 5 h on one of these GPUs (Triton
+        # compiles and autotunes per shape), so each GPU runs it as three shards.
         gpu: [strix-halo, radeon-r9700]
-        shard: [1, 2]
+        shard: [1, 2, 3]
         include:
           - gpu: strix-halo
             gfx: gfx1151
@@ -67,9 +67,9 @@ jobs:
     env:
       TORCH_SPEC: ${{ inputs.torch_spec || 'torch' }}
       TORCH_INDEX_URL: ${{ inputs.torch_index_url || 'https://download.pytorch.org/whl/rocm7.2' }}
-      PER_FILE: ${{ inputs.tests_per_file || '4' }}
+      PER_FILE: ${{ inputs.tests_per_file || '3' }}
       SHARD: ${{ matrix.shard }}
-      SHARDS: "2"
+      SHARDS: "3"
       TEST_PATHS: ${{ inputs.test_paths || '' }}
       PYTEST_K: ${{ inputs.pytest_k || '' }}
       LABEL: ${{ inputs.label || 'release' }}
@@ -276,9 +276,12 @@ jobs:
             echo "::group::$f"
             start=$SECONDS
             rc=0
+            # 10 min per test; the file gets that per sampled test plus slack, so
+            # pytest itself reports a hung test (with its stack) and writes junit.
+            budget=$(( PER_FILE > 0 ? PER_FILE * 600 + 300 : 5400 ))
             PYTHONPATH="$SAMPLER_DIR" DEVLAB_PER="$PER_FILE" DEVLAB_GROUP=file \
-              timeout -k 30 1800 python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
-              -o log_cli=false --tb=short --timeout=900 --junitxml="$xml" "${k[@]}" || rc=$?
+              timeout -k 30 "$budget" python -m pytest "$f" -p devlab_sample -q -rfE -p no:cacheprovider \
+              -o log_cli=false --tb=short --timeout=600 --junitxml="$xml" "${k[@]}" || rc=$?
             echo "::endgroup::"
             echo "$f: exit $rc in $((SECONDS - start)) s"
             printf '%s\t%s\t%s\n' "$f" "$rc" "$xml" >> files.tsv
@@ -306,6 +309,7 @@ jobs:
                   f, rc, xml = row.rstrip("\n").split("\t")
                   rc = int(rc)
                   ids = []
+                  parsed = False
                   if os.path.exists(xml):
                       try:
                           root = ET.parse(xml).getroot()
@@ -314,12 +318,13 @@ jobs:
                                   cls, name = case.get("classname", ""), case.get("name", "")
                                   ids.append(f"{f}::{name}" if cls.replace(".", "/") + ".py" == f or not cls
                                              else f"{f}::{cls.rsplit('.', 1)[-1]}::{name}")
+                          parsed = True
                       except ET.ParseError:
                           pass
                   # pytest: 0 pass, 1 test failures, 5 nothing collected. Anything
                   # else with no failing case in junit is a crash, timeout or a
                   # collection/usage error: name it so it can be judged too.
-                  if rc not in (0, 1, 5) and not ids:
+                  if (rc not in (0, 1, 5) or (rc == 1 and not parsed)) and not ids:
                       ids.append(f"{f}::<exit {rc}>")
                   failing += ids
           known_hits, new = [], []
@@ -380,7 +385,7 @@ jobs:
               "schema": 1, "project": "flash-linear-attention", "label": os.environ["LABEL"],
               "release": env.get("fla", ""), "combo": f"torch{env.get('torch', '?')}",
               "torch_spec": os.environ.get("TORCH_SPEC", ""), "gpu": "${{ matrix.gpu }}",
-              "gfx": "${{ matrix.gfx }}", "shard": "${{ matrix.shard }}/2", "env": env or None, "smoke": load("smoke.json"),
+              "gfx": "${{ matrix.gfx }}", "shard": "${{ matrix.shard }}/3", "env": env or None, "smoke": load("smoke.json"),
               "tests": tests, "job_status": "${{ job.status }}", "commit": "${{ github.sha }}",
               "run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
               "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
