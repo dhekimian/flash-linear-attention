@@ -38,4 +38,4 @@ tests/models/test_modeling_parallax.py::test_modeling[[]L4-B4-T1024-H4-D64-l2Fal
 tests/ops/test_delta_product.py::test_chunk_varlen* | delta_product chunk varlen needs 68 KB shared memory > 64 KB on RDNA | not filed
 tests/ops/test_gdp.py::test_chunk_varlen* | gdp chunk varlen (D256) needs 68 KB shared memory > 64 KB on RDNA | not filed
 tests/ops/test_oja.py::test_chunk_varlen* | oja chunk varlen (D128) needs 280 KB shared memory > 64 KB on RDNA | not filed
-tests/ops/test_mesa.py::test_chunk_varlen[[]H3-D50-gate_range[[]0.8, 0.99[]]-cu_seqlens[[]0, 15[]]-torch.float16[]] | gfx1201 only, deterministic (3 runs): dq relative error 0.256 vs reference (D=50, one 15-token sequence); gfx1151 passes | not filed
+tests/ops/test_mesa.py::test_chunk_varlen[[]H3-D50-gate_range[[]0.8, 0.99[]]-cu_seqlens[[]0, 15[]]-torch.float16[]] | gfx1201 only, deterministic (2 of 2 runs): dq relative error 0.256 vs reference (D=50, one 15-token sequence); gfx1151 passes | not filed
